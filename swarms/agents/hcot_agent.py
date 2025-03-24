@@ -7,6 +7,8 @@ from collections import Counter
 from tqdm import tqdm
 import pandas as pd
 from loguru import logger
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # Agent system prompts
 HOT_SYSTEM_PROMPT = """
@@ -38,7 +40,7 @@ class Agent:
             self,
             agent_name: str,
             description: str,
-            model_name: str = "gpt-4o",
+            model_name: str = "gemini-1.5-flash",
             system_prompt: str = None,
             temperature: float = 0.7,
             max_tokens: int = 2048
@@ -52,15 +54,20 @@ class Agent:
 
     def run(self, task: str) -> str:
         """Run the agent on a task"""
-        # This would be implemented with an actual API call
-        # For now, we'll just return a placeholder
-        return f"Response from {self.agent_name} using {self.model_name} on task: {task[:30]}..."
+        # Call API through the APIHandler
+        return APIHandler.call_api(
+            model=self.model_name,
+            system_prompt=self.system_prompt,
+            prompt=task,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens
+        )
 
 
 class ReformulationAgent(Agent):
     """Agent that identifies and tags key facts in a question"""
 
-    def __init__(self, model_name: str = "gpt-4o", temperature: float = 0.5):
+    def __init__(self, model_name: str = "gemini-1.5-flash", temperature: float = 0.5):
         super().__init__(
             agent_name="Reformulation-Agent",
             description="An agent that identifies and tags key facts in a question",
@@ -69,17 +76,11 @@ class ReformulationAgent(Agent):
             temperature=temperature
         )
 
-    def run(self, question: str) -> str:
-        """Tag important facts in the question"""
-        # This would call the LLM API with appropriate prompting
-        # For demonstration, we'll return a formatted response
-        return f"Reformatted Question: {question}"  # In real implementation, this would include fact tags
-
 
 class ReasoningAgent(Agent):
     """Agent that generates explanations grounded in tagged facts"""
 
-    def __init__(self, model_name: str = "gpt-4o", temperature: float = 0.7):
+    def __init__(self, model_name: str = "gemini-1.5-flash", temperature: float = 0.7):
         super().__init__(
             agent_name="Reasoning-Agent",
             description="An agent that generates explanations grounded in tagged facts",
@@ -88,17 +89,11 @@ class ReasoningAgent(Agent):
             temperature=temperature
         )
 
-    def run(self, reformulated_question: str) -> str:
-        """Generate an explanation grounded in the tagged facts"""
-        # This would call the LLM API with appropriate prompting
-        # For demonstration, we'll return a formatted response
-        return f"Answer: Based on <fact1> and <fact2>, I conclude that... {{Final answer}}"
-
 
 class AggregationAgent(Agent):
     """Agent that aggregates multiple responses"""
 
-    def __init__(self, model_name: str = "gpt-4o", temperature: float = 0.3):
+    def __init__(self, model_name: str = "gemini-1.5-flash", temperature: float = 0.3):
         super().__init__(
             agent_name="Aggregation-Agent",
             description="An agent that aggregates multiple responses into a single final answer",
@@ -110,9 +105,13 @@ class AggregationAgent(Agent):
     def run(self, responses: List[str]) -> str:
         """Aggregate multiple responses into a single answer"""
         task = "\n\n".join([f"Response {i + 1}: {r}" for i, r in enumerate(responses)])
-        # This would call the LLM API with appropriate prompting
-        # For demonstration, we'll simulate simple majority voting
-        return f"Final aggregated answer based on {len(responses)} responses: {{Consensus answer}}"
+        return APIHandler.call_api(
+            model=self.model_name,
+            system_prompt=self.system_prompt,
+            prompt=task,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens
+        )
 
 
 class HighlightedChainOfThoughtAgent:
@@ -125,7 +124,7 @@ class HighlightedChainOfThoughtAgent:
 
     def __init__(
             self,
-            model_name: str = "gpt-4o",
+            model_name: str = "gemini-1.5-flash",
             num_samples: int = 3,
             temperature: float = 0.7,
             fact_tag_style: str = "standard",  # "standard", "numeric", or "bracket"
@@ -191,6 +190,8 @@ class HighlightedChainOfThoughtAgent:
                 for future in as_completed(futures):
                     response = future.result()
                     responses.append(response)
+                    # Print each sub-agent's response as it becomes available
+                    print(f"\nSub-agent response:\n{response}\n")
 
             result["responses"] = responses
 
@@ -202,6 +203,8 @@ class HighlightedChainOfThoughtAgent:
             response = self.run_single_path(question)
             result["responses"] = [response]
             result["final_answer"] = response
+            # Print the sub-agent's response
+            print(f"\nSub-agent response:\n{response}\n")
 
         return result
 
@@ -230,39 +233,160 @@ class HighlightedChainOfThoughtAgent:
         return results
 
 
+class GeminiAPI:
+    """Handler for Google Gemini API calls"""
+
+    _initialized = False
+
+    @staticmethod
+    def initialize(api_key: str = None):
+        """Initialize the Gemini API with the provided API key"""
+        if GeminiAPI._initialized:
+            return
+
+        # Use environment variable if no API key provided
+        if api_key is None:
+            api_key = os.environ.get("GEMINI_API_KEY")
+
+        if not api_key:
+            raise ValueError(
+                "Google API key must be provided either as an argument or as GEMINI_API_KEY environment variable")
+
+        # Configure the Gemini API client
+        genai.configure(api_key=api_key)
+        GeminiAPI._initialized = True
+        logger.info("Google Gemini API initialized successfully")
+
+    @staticmethod
+    def get_available_models():
+        """Get a list of available Gemini models"""
+        if not GeminiAPI._initialized:
+            raise RuntimeError("Gemini API not initialized. Call GeminiAPI.initialize() first")
+
+        models = genai.list_models()
+        gemini_models = [model.name for model in models if "gemini" in model.name.lower()]
+        return gemini_models
+
+    @staticmethod
+    def call_gemini(
+            model_name: str,
+            system_prompt: str,
+            prompt: str,
+            temperature: float = 0.7,
+            max_tokens: int = 2048
+    ) -> str:
+        """
+        Call the Google Gemini API
+
+        Args:
+            model_name: Model name (e.g., "gemini-pro", "gemini-1.5-pro")
+            system_prompt: System prompt/instructions for the model
+            prompt: User prompt/query
+            temperature: Sampling temperature (0.0 to 1.0)
+            max_tokens: Maximum tokens to generate
+
+        Returns:
+            Generated response text
+        """
+        if not GeminiAPI._initialized:
+            raise RuntimeError("Gemini API not initialized. Call GeminiAPI.initialize() first")
+
+        # Extract the model name without version prefix if needed
+        model_name = model_name.replace("google/", "").strip()
+
+        counter = 0
+        max_retries = 3
+
+        while counter < max_retries:
+            try:
+                # Configure safety settings - less restrictive but still safe
+                safety_settings = {
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH
+                }
+
+                # Create the model instance
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config={
+                        "temperature": temperature,
+                        "max_output_tokens": max_tokens,
+                        "top_p": 0.95,
+                        "top_k": 40
+                    },
+                    safety_settings=safety_settings
+                )
+
+                # Combine system prompt and user prompt
+                full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+
+                # Generate response
+                response = model.generate_content(full_prompt)
+
+                # Handle potential error in response
+                if hasattr(response, 'error'):
+                    logger.error(f"Gemini API error: {response.error}")
+                    counter += 1
+                    continue
+
+                # Extract and return the text content
+                return response.text
+
+            except Exception as e:
+                logger.error(f"Gemini API call failed: {str(e)}")
+                counter += 1
+                if counter == max_retries:
+                    return f"Error calling Gemini API after {max_retries} attempts: {str(e)}"
+
+        return "Failed to get response from Gemini API"
+
+
 class APIHandler:
     """Handler for API calls to different LLM providers"""
 
     @staticmethod
-    def call_api(model: str, prompt: str, temperature: float = 0.7, max_tokens: int = 2048) -> Optional[str]:
+    def call_api(
+            model: str,
+            system_prompt: str = None,
+            prompt: str = None,
+            temperature: float = 0.7,
+            max_tokens: int = 2048
+    ) -> Optional[str]:
         """
         Call the appropriate API based on the model name
 
         Args:
             model: Model name (e.g., "gpt-4o", "claude-3", "gemini-pro")
-            prompt: The prompt to send
+            system_prompt: System instructions (model specific)
+            prompt: The user prompt to send
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
 
         Returns:
             Response text or None if the request failed
         """
-        # This would implement actual API calls
-        # For now, we return a placeholder
-        counter = 0
-        max_retries = 3
-
-        while counter < max_retries:
+        # Determine which API to use based on the model name
+        if "gemini" in model.lower():
+            # Ensure the Gemini API is initialized
             try:
-                # Simulate API call
-                return f"API response from {model} with temp={temperature}"
+                GeminiAPI.initialize()
+                return GeminiAPI.call_gemini(
+                    model_name=model,
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
             except Exception as e:
-                logger.error(f"API call failed: {str(e)}")
-                counter += 1
-                if counter == max_retries:
-                    return None
-
-        return None
+                logger.error(f"Error calling Gemini API: {str(e)}")
+                return None
+        else:
+            # Handle OpenAI (GPT) or other API calls
+            # In a real implementation, you would add specific API handlers for each provider
+            logger.info(f"Using model: {model} (non-Gemini)")
+            return f"API response from {model} with temp={temperature}"
 
 
 def create_hot_prompt(question: str, dataset: str) -> str:
@@ -305,10 +429,13 @@ Answer: [explanation with fact references] {{final answer}}
 
 
 def main():
-    """Example usage of the HoT agent"""
-    # Initialize the agent
+    """Example usage of the HoT agent with Gemini API"""
+    # Initialize the Gemini API (you can also set GEMINI_API_KEY environment variable)
+    # GeminiAPI.initialize(api_key="your_api_key_here")
+
+    # Initialize the agent with Gemini
     hot_agent = HighlightedChainOfThoughtAgent(
-        model_name="gpt-4o",
+        model_name="gemini-1.5-flash",  # Use Gemini 1.5 Flash model
         num_samples=3,
         temperature=0.7,
         use_self_consistency=True
@@ -320,20 +447,15 @@ def main():
     # Run the agent
     result = hot_agent.run(question)
 
-    # Print the result
+    # Print the question
     print("\nQuestion:")
     print(question)
-    print("\nFinal Answer:")
+
+    # Print each sub-agent's response was already printed during execution; now print the aggregated final answer
+    print("\nFinal Aggregated Answer:")
     print(result["final_answer"])
 
-    # Batch processing example
-    questions = [
-        "The heart pumps blood through the body. What is the main function of red blood cells in this process?",
-        "If a train travels at 60 miles per hour for 3 hours, how far does it travel?",
-        "Water boils at 100 degrees Celsius at sea level. What happens to the boiling point as altitude increases?"
-    ]
-
-    results = hot_agent.batch_run(questions, save_path="hot_results.csv")
+    print(f"\nCompleted questions with Gemini model")
 
 
 if __name__ == "__main__":
