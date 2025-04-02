@@ -1,6 +1,6 @@
-<h align="center">
+<h1 align="center">
   Swarms HCOT Agent - based off this paper: https://arxiv.org/abs/2503.02003
-</h>
+</h1>
 <div align="center">
   <a href="https://swarms.world">
     <img src="https://github.com/kyegomez/swarms/blob/master/images/swarmslogobanner.png" style="margin: 15px; max-width: 300px" width="50%" alt="Logo">
